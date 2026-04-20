@@ -1,0 +1,23 @@
+[package]
+name = "pipewire-control-gtk"
+description = "GTK4 / libadwaita UI for pipewire-control"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pipewire-control"
+path = "src/main.rs"
+
+[dependencies]
+pipewire-control-core = { path = "../core" }
+pipewire-control-effects = { path = "../effects" }
+gtk4.workspace = true
+libadwaita.workspace = true
+relm4.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
