@@ -12,7 +12,7 @@ use pipewire_control_core::{
     model::PwEvent,
     pw_engine::PwEngine,
 };
-use tower_http::cors::CorsLayer;
+use tower_http::{cors::CorsLayer, services::ServeDir};
 
 #[tokio::main]
 async fn main() {
@@ -20,12 +20,17 @@ async fn main() {
 
     let engine = PwEngine::start();
 
+    let static_dir = std::env::current_dir()
+        .unwrap()
+        .join("crates/web-server/static");
+
     let app = Router::new()
         .route("/health", get(health))
         .route("/nodes", get(list_nodes))
         .route("/ws", get(ws_handler))
         .layer(CorsLayer::permissive())
-        .with_state(engine);
+        .with_state(engine)
+        .fallback_service(ServeDir::new(static_dir));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:7878").await.unwrap();
     tracing::info!("listening on {}", listener.local_addr().unwrap());

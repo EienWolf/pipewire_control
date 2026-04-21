@@ -28,7 +28,7 @@ clap = { version = "4", features = ["derive"] }
 
 # Web
 axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
 
 # Async
 tokio = { version = "1", features = ["full"] }
