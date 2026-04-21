@@ -371,6 +371,44 @@ main { flex: 1; padding: 14px; }
 .kk { font-size: 8px; color: var(--text-30); text-transform: uppercase; letter-spacing: .05em; }
 .kv-val { font-size: 9px; color: var(--text-60); }
 
+/* ── Now Playing ─────────────────────────────────────────────── */
+.playing-wrap { border-top: 1px solid var(--border-l); }
+
+.playing-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 9px 3px 25px;
+  font-size: 9px; color: var(--text-30);
+  text-transform: uppercase; letter-spacing: .07em;
+}
+.playing-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 4px var(--green);
+  animation: blink 2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.playing-list { padding: 0 9px 5px 25px; }
+
+.playing-row {
+  display: flex; align-items: center; gap: 7px;
+  padding: 2px 0;
+  font-size: 10px; color: var(--text-60);
+}
+.playing-led {
+  width: 5px; height: 5px; border-radius: 50%;
+  flex-shrink: 0;
+}
+.playing-name {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-100);
+}
+.playing-app {
+  font-size: 9px; color: var(--text-30);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 80px;
+}
+
 /* ── Props toggle ────────────────────────────────────────────── */
 .props-wrap { border-top: 1px solid var(--border-l); }
 
@@ -487,8 +525,9 @@ main { flex: 1; padding: 14px; }
 'use strict';
 
 // ── State ────────────────────────────────────────────────────────────────────
-const nodes       = new Map();   // id(number) → AudioNode
-const expanded    = new Set();   // node ids with open props
+const nodes    = new Map();   // id → AudioNode
+const links    = new Map();   // id → AudioLink  { id, output_node, input_node, active }
+const expanded = new Set();   // node ids with open props
 
 // ── Routing map ─────────────────────────────────────────────────────────────
 const CLASS_TO_NC = {
@@ -526,6 +565,39 @@ function stateLabel(state) {
   return 'Unknown';
 }
 
+// ── Playing section (sinks only) ─────────────────────────────────────────────
+function playingHTML(sinkId) {
+  // Find all links pointing INTO this sink, then look up the source stream node.
+  const streams = [];
+  for (const lnk of links.values()) {
+    if (lnk.input_node !== sinkId) continue;
+    const stream = nodes.get(lnk.output_node);
+    if (!stream) continue;
+    // Skip capture streams / monitors — only show playback streams.
+    if (stream.media_class && !stream.media_class.startsWith('Stream/Output')) continue;
+    streams.push({ stream, active: lnk.active });
+  }
+  if (streams.length === 0) return '';
+
+  const rows = streams.map(({ stream: s, active }) => {
+    const name = displayName(s);
+    const app  = s.application_name || '';
+    const sk   = stateKey(s.state);
+    const ledColor = sk === 'Running' ? 'var(--green)' : sk === 'Idle' ? 'var(--amber)' : 'var(--slate)';
+    const ledGlow  = sk === 'Running' ? `box-shadow:0 0 4px var(--green)` : '';
+    return `<div class="playing-row">
+      <div class="playing-led" style="background:${ledColor};${ledGlow}"></div>
+      <span class="playing-name" title="${esc(name)}">${esc(name)}</span>
+      ${app ? `<span class="playing-app" title="${esc(app)}">${esc(app)}</span>` : ''}
+    </div>`;
+  }).join('');
+
+  return `<div class="playing-wrap">
+  <div class="playing-header"><div class="playing-dot"></div>Now Playing (${streams.length})</div>
+  <div class="playing-list">${rows}</div>
+</div>`;
+}
+
 // ── Card HTML ────────────────────────────────────────────────────────────────
 function cardHTML(n) {
   const sk    = stateKey(n.state);
@@ -533,6 +605,7 @@ function cardHTML(n) {
   const name  = displayName(n);
   const props = Object.entries(n.extra_props || {});
   const isExp = expanded.has(n.id);
+  const isSink = n.media_class === 'Audio/Sink';
 
   const appLine = n.application_name
     ? `<div class="card-app">${esc(n.application_name)}${
@@ -549,6 +622,8 @@ function cardHTML(n) {
     ...(n.client_id != null  ? [['cli', n.client_id]]  : []),
     ...(n.device_id != null  ? [['dev', n.device_id]]  : []),
   ].map(([k,v]) => `<div class="kv"><span class="kk">${k}</span><span class="kv-val">${v}</span></div>`).join('');
+
+  const playBlock = isSink ? playingHTML(n.id) : '';
 
   const propsBlock = props.length > 0 ? `
 <div class="props-wrap">
@@ -579,7 +654,7 @@ function cardHTML(n) {
   </div>
 </div>
 <div class="card-foot">${ids}</div>
-${propsBlock}`;
+${playBlock}${propsBlock}`;
 }
 
 // ── DOM ops ──────────────────────────────────────────────────────────────────
@@ -650,11 +725,21 @@ function setStatus(cls, text) {
   document.getElementById('ws-txt').textContent = text;
 }
 
+// Re-render the sink card that owns a given stream (via links).
+function refreshSinksFor(streamNodeId) {
+  for (const lnk of links.values()) {
+    if (lnk.output_node !== streamNodeId) continue;
+    const sink = nodes.get(lnk.input_node);
+    if (sink) upsertCard(sink, false);
+  }
+}
+
 function handleMsg(msg) {
   switch (msg.type) {
     case 'Snapshot':
-      nodes.clear();
-      msg.data.forEach(n => nodes.set(n.id, n));
+      nodes.clear(); links.clear();
+      msg.data.nodes.forEach(n => nodes.set(n.id, n));
+      msg.data.links.forEach(l => links.set(l.id, l));
       renderAll();
       break;
     case 'NodeAdded':
@@ -665,11 +750,28 @@ function handleMsg(msg) {
     case 'NodeUpdated':
       nodes.set(msg.data.id, msg.data);
       upsertCard(msg.data, false);
+      // If a stream state changed, update its connected sink's "Playing" section.
+      if (msg.data.media_class === 'Stream/Output/Audio') refreshSinksFor(msg.data.id);
       updateCounts();
       break;
     case 'NodeRemoved':
       nodes.delete(msg.data.id);
       removeCard(msg.data.id);
+      break;
+    case 'LinkAdded':
+      links.set(msg.data.id, msg.data);
+      // Re-render the sink that just got a new stream connected.
+      { const sink = nodes.get(msg.data.input_node);
+        if (sink) upsertCard(sink, false); }
+      break;
+    case 'LinkRemoved':
+      { const lnk = links.get(msg.data.id);
+        links.delete(msg.data.id);
+        if (lnk) {
+          const sink = nodes.get(lnk.input_node);
+          if (sink) upsertCard(sink, false);
+        }
+      }
       break;
   }
 }

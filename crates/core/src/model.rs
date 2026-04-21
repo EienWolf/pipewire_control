@@ -144,18 +144,29 @@ impl AudioNode {
     }
 }
 
+/// A directed connection between two PipeWire nodes.
+/// `output_node` sends audio → `input_node` receives it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioLink {
+    pub id: u32,
+    /// Node that produces audio (e.g. a Stream/Output/Audio).
+    pub output_node: u32,
+    /// Node that consumes audio (e.g. an Audio/Sink).
+    pub input_node: u32,
+    pub active: bool,
+}
+
 /// Events broadcast from the PipeWire engine to any subscriber.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum PwEvent {
-    /// A new audio node appeared in the PipeWire graph.
     NodeAdded(AudioNode),
-    /// A node's info (state, port count, properties) changed.
     NodeUpdated(AudioNode),
-    /// A node was removed.
     NodeRemoved { id: u32 },
-    /// Full snapshot of all current nodes (sent on WebSocket connect).
-    Snapshot(Vec<AudioNode>),
+    LinkAdded(AudioLink),
+    LinkRemoved { id: u32 },
+    /// Full graph state sent on WebSocket connect and after lag recovery.
+    Snapshot { nodes: Vec<AudioNode>, links: Vec<AudioLink> },
 }
 
 /// Commands sent from other threads into the PipeWire engine loop.

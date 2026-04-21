@@ -42,7 +42,7 @@ async fn health() -> &'static str {
 }
 
 async fn list_nodes(State(engine): State<PwEngine>) -> impl IntoResponse {
-    let mut nodes: Vec<_> = engine.snapshot();
+    let mut nodes = engine.nodes.read().unwrap().values().cloned().collect::<Vec<_>>();
     nodes.sort_by_key(|n| n.id);
     (StatusCode::OK, Json(nodes))
 }
@@ -55,8 +55,7 @@ async fn ws_handler(
 }
 
 async fn handle_socket(mut socket: WebSocket, engine: PwEngine) {
-    // Send full snapshot immediately on connect.
-    let snapshot = PwEvent::Snapshot(engine.snapshot());
+    let snapshot = engine.snapshot();
     if let Ok(msg) = serde_json::to_string(&snapshot) {
         if socket.send(Message::Text(msg.into())).await.is_err() {
             return;
@@ -81,8 +80,7 @@ async fn handle_socket(mut socket: WebSocket, engine: PwEngine) {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!("WebSocket client lagged by {n} events, sending fresh snapshot");
-                        let snapshot = PwEvent::Snapshot(engine.snapshot());
-                        if let Ok(msg) = serde_json::to_string(&snapshot) {
+                        if let Ok(msg) = serde_json::to_string(&engine.snapshot()) {
                             if socket.send(Message::Text(msg.into())).await.is_err() {
                                 break;
                             }
