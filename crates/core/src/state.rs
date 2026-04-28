@@ -1,12 +1,21 @@
-use crate::router::Router;
+use crate::{preset::Preset, soundboard::SoundClip, virtual_mic::VirtualMic};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AppState {
-    pub router: Router,
     pub active_profile: Option<String>,
+    #[serde(default)]
+    pub presets: Vec<Preset>,
+    #[serde(default)]
+    pub virtual_mics: Vec<VirtualMic>,
+    /// node_name → preset_id — persisted WirePlumber routing rules
+    #[serde(default)]
+    pub stream_routes: HashMap<String, String>,
+    #[serde(default)]
+    pub clips: Vec<SoundClip>,
 }
 
 impl AppState {

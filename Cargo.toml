@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/core",
-    "crates/effects",
     "crates/cli",
     "crates/gtk-app",
     "crates/web-server",
@@ -16,7 +15,7 @@ license = "GPL-3.0"
 
 [workspace.dependencies]
 # PipeWire
-pipewire = "0.9"
+pipewire = { version = "0.9", features = ["v0_3_34", "v0_3_41"] }
 
 # GTK
 gtk4 = "0.9"
@@ -27,7 +26,7 @@ relm4 = { version = "0.9", features = ["libadwaita"] }
 clap = { version = "4", features = ["derive"] }
 
 # Web
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 
 # Async
@@ -48,3 +47,9 @@ anyhow = "1"
 
 # System
 dirs = "5"
+
+# Audio decoding (soundboard)
+symphonia = { version = "0.5", features = ["all"] }
+
+# IDs
+uuid = { version = "1", features = ["v4", "serde"] }

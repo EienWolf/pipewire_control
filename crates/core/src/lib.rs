@@ -1,6 +1,11 @@
-pub mod effects_chain;
+pub mod conf_gen;
 pub mod ipc;
+pub mod ladspa;
+pub mod lv2;
 pub mod model;
+pub mod preset;
+pub mod playback;
 pub mod pw_engine;
-pub mod router;
+pub mod soundboard;
 pub mod state;
+pub mod virtual_mic;

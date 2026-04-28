@@ -20,6 +20,10 @@ pub struct AudioNode {
     pub state: NodeState,
     pub n_input_ports: u32,
     pub n_output_ports: u32,
+    /// PipeWire-reported volume (0.0–1.5+), updated from NodeParam::Props via wpctl.
+    pub volume: Option<f32>,
+    /// PipeWire-reported mute state, updated from NodeParam::Props via wpctl.
+    pub mute: Option<bool>,
     /// Raw key-value properties for anything not covered above.
     pub extra_props: HashMap<String, String>,
 }
@@ -118,6 +122,8 @@ impl AudioNode {
             state: NodeState::Creating,
             n_input_ports: 0,
             n_output_ports: 0,
+            volume: None,
+            mute: None,
             extra_props,
         }
     }
@@ -164,12 +170,55 @@ pub enum PwEvent {
     NodeUpdated(AudioNode),
     NodeRemoved { id: u32 },
     LinkAdded(AudioLink),
+    LinkUpdated(AudioLink),
     LinkRemoved { id: u32 },
+    /// Default audio sink or source changed (matched against `node_name`).
+    DefaultsChanged { sink_name: Option<String>, source_name: Option<String> },
+    /// Real-time peak level for an active preset (sent at ~20 Hz while active).
+    AudioLevel { preset_id: String, peak_l: f32, peak_r: f32 },
     /// Full graph state sent on WebSocket connect and after lag recovery.
-    Snapshot { nodes: Vec<AudioNode>, links: Vec<AudioLink> },
+    Snapshot {
+        nodes: Vec<AudioNode>,
+        links: Vec<AudioLink>,
+        default_sink: Option<String>,
+        default_source: Option<String>,
+    },
+    /// A preset's virtual sink was successfully created in PipeWire.
+    PresetActivated { preset_id: String, node_id: u32 },
+    /// A preset's virtual sink was torn down.
+    PresetDeactivated { preset_id: String },
+    /// A virtual mic Audio/Source node was successfully created.
+    VirtualMicCreated { mic_id: String, node_id: u32 },
+    /// A virtual mic Audio/Source node was torn down.
+    VirtualMicDestroyed { mic_id: String },
+    /// A soundboard clip began playing.
+    PlaybackStarted {
+        playback_id: String,
+        clip_id: String,
+        target_node_name: Option<String>,
+        duration_ms: u64,
+    },
+    /// A soundboard playback ended (finished naturally or was stopped).
+    PlaybackEnded { playback_id: String },
 }
 
 /// Commands sent from other threads into the PipeWire engine loop.
 pub enum EngineCmd {
     Shutdown,
+    PlayClip {
+        playback_id: String,
+        clip_id: String,
+        samples: std::sync::Arc<Vec<f32>>,
+        sample_rate: u32,
+        target_node_name: Option<String>,
+        knobs: std::sync::Arc<crate::playback::PlaybackKnobs>,
+    },
+    StopPlayback {
+        playback_id: String,
+    },
+    /// Internal: emitted by the RT process callback when a non-looping clip
+    /// reaches its end. Triggers cleanup on the main loop.
+    PlaybackFinished {
+        playback_id: String,
+    },
 }

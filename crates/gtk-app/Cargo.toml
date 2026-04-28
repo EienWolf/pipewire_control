@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 pipewire-control-core = { path = "../core" }
-pipewire-control-effects = { path = "../effects" }
 gtk4.workspace = true
 libadwaita.workspace = true
 relm4.workspace = true

@@ -1,2 +1,6 @@
 /target
 Cargo.lock
+
+testsprite_tests
+lv2info
+ladspainfo

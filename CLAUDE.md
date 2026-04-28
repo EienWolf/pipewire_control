@@ -4,39 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**pipewire_control** is a PipeWire-based audio routing and effects application inspired by SteelSeries Sonar. It exposes its functionality through three interfaces: a CLI, a native GTK4 app, and an optional web server. The audio engine supports virtual sinks/sources, per-stream routing, and a plugin-based effects/EQ chain (modeled after EasyEffects).
+**pipewire_control** is a PipeWire-based audio routing and effects application inspired by SteelSeries Sonar. It exposes its functionality through three interfaces: a CLI, a native GTK4 app, and an optional web server. The audio engine supports virtual sinks/sources, per-stream routing, parametric EQ, and a plugin-based effects chain.
 
 ## Build Commands
 
 ```bash
-# Build all crates
-cargo build
-
-# Build release
+cargo build                          # all crates
 cargo build --release
-
-# Run CLI
-cargo run -p pwctl -- <args>
-
-# Run GTK4 app
-cargo run -p pipewire-control-gtk
-
-# Run web server
-cargo run -p pipewire-control-web
-
-# Run all tests
-cargo test
-
-# Run tests for a specific crate
+cargo run -p pipewire-control-web    # web server (port 7878)
+cargo run -p pwctl -- <args>         # CLI
+cargo run -p pipewire-control-gtk   # GTK4 app
 cargo test -p pipewire-control-core
-
-# Run a single test
-cargo test -p pipewire-control-core test_name
-
-# Lint
 cargo clippy --all-targets --all-features
-
-# Format
 cargo fmt --all
 ```
 
@@ -44,81 +23,232 @@ cargo fmt --all
 
 ```
 pipewire_control/
-├── Cargo.toml              # Workspace root
-├── crates/
-│   ├── core/               # PipeWire engine, routing state, effects chain
-│   ├── cli/                # CLI binary (pwctl)
-│   ├── gtk-app/            # GTK4 + libadwaita UI
-│   ├── web-server/         # Optional HTTP/WebSocket server (axum)
-│   └── effects/            # Built-in DSP effects + LV2/LADSPA plugin loader
-└── plugins/                # Optional bundled LV2 plugins
+├── Cargo.toml
+└── crates/
+    ├── core/        # PipeWire engine, routing, DSP, presets, virtual mics
+    ├── cli/         # CLI binary (pwctl), clap
+    ├── gtk-app/     # GTK4 + libadwaita + relm4 (UI stub)
+    └── web-server/  # axum 0.8 REST + WebSocket + single-file HTML UI
 ```
 
-## Architecture
+## Core Modules (`crates/core/src/`)
 
-### Core (`crates/core`)
-
-The heart of the project. All three frontends depend on it — never put PipeWire or DSP logic in the frontends.
-
-- **`pw_engine`**: Owns the PipeWire main loop and registry. Manages node lifecycle (virtual sinks, sources, filters) using the `pipewire` crate (pipewire-rs).
-- **`router`**: State machine for stream-to-node assignments. Tracks which app stream maps to which virtual sink and which effects chain.
-- **`effects_chain`**: An ordered list of `Effect` trait objects per virtual sink. Each effect wraps either a built-in DSP block or an LV2/LADSPA plugin instance.
-- **`state`**: Serializable snapshot of the entire routing + effects config. Loaded at startup, persisted on change. Lives in `~/.config/pipewire-control/`.
-- **`ipc`**: Unix domain socket IPC used by CLI and web server to communicate with the running daemon. The GTK app may embed core directly instead of going through IPC.
-
-### Daemon model
-
-The core runs as a background daemon (`pipewire-controld`). CLI and web server talk to it via IPC. The GTK app can either connect to the daemon or embed core in-process (configurable).
-
-### Effects Plugin System
-
-Modeled after EasyEffects:
-- `Effect` trait: `fn process(&mut self, buffer: &mut [f32])` + metadata (name, parameters).
-- Built-in effects live in `crates/effects/src/builtin/` (parametric EQ, compressor, limiter, gate).
-- LV2 plugins loaded via `lv2` crate; LADSPA via raw `dlopen`. Plugin discovery scans `LV2_PATH` and `LADSPA_PATH`.
-- Each virtual sink has its own chain: `Vec<Box<dyn Effect>>`.
-
-### Frontends
-
-- **CLI** (`crates/cli`): Built with `clap`. Sends commands to daemon via IPC. Subcommands: `sink`, `source`, `route`, `effects`, `profile`.
-- **GTK4 app** (`crates/gtk-app`): Built with `gtk4` + `libadwaita`. Embeds or connects to core. Uses `relm4` for reactive UI patterns.
-- **Web server** (`crates/web-server`): `axum`-based REST + WebSocket. REST for commands, WebSocket for live state push. Optional — not started by default.
-
-## Key Dependencies
-
-| Crate | Purpose |
+| Module | Purpose |
 |---|---|
-| `pipewire` | PipeWire Rust bindings (pipewire-rs) |
-| `gtk4` + `libadwaita` | Native GTK4 UI |
-| `relm4` | Elm-style reactive GTK4 patterns |
-| `clap` | CLI argument parsing |
-| `axum` | Web server |
-| `tokio` | Async runtime (web server + IPC) |
-| `lv2` | LV2 plugin host |
-| `serde` + `serde_json` / `toml` | State serialization |
-| `zbus` | D-Bus integration (for media key support, MPRIS) |
+| `pw_engine` | PipeWire main loop, registry listener, cmd dispatch (read-only) |
+| `model` | `AudioNode`, `AudioLink`, `PwEvent`, `EngineCmd` |
+| `preset` | Virtual Audio/Sink with an LV2 effect chain → N output sinks |
+| `virtual_mic` | Virtual Audio/Source mixing N capture inputs (gain-only filter-chain) |
+| `lv2` | LV2 plugin catalog: `lv2ls` + `lv2info` parser, JSON cache |
+| `ipc` | Unix socket protocol (used by CLI) |
+| `conf_gen` | Generates PW/WirePlumber config files from AppState + Lv2Catalog |
+| `state` | `AppState` — persisted to `~/.config/pipewire-control/state.toml` |
 
-## IPC Protocol
+All audio processing happens inside `libpipewire-module-filter-chain` (and
+`libpipewire-module-loopback`) generated by `conf_gen`; no DSP runs in Rust.
+The PipeWire engine is observation-only. Applying changes regenerates
+`~/.config/pipewire/pipewire.conf.d/pwctl.conf` and restarts pipewire+wireplumber.
 
-Unix socket at `/run/user/$UID/pipewire-controld.sock`. Messages are newline-delimited JSON (`serde_json`). Request: `{"cmd": "route", "params": {...}}`. Response: `{"ok": true, "data": {...}}` or `{"ok": false, "error": "..."}`.
+### AppState
 
-## Feature Roadmap (Priority Order)
+```rust
+pub struct AppState {
+    pub active_profile: Option<String>,
+    pub presets: Vec<Preset>,
+    pub virtual_mics: Vec<VirtualMic>,
+    pub stream_routes: HashMap<String, String>, // node_name → preset_id, persisted WP routing rules
+}
+```
 
-1. **Phase 1 — Core engine**: PipeWire virtual sinks, stream detection, basic routing (no effects).
-2. **Phase 2 — CLI**: Full CRUD for sinks, sources, routes, profiles via IPC.
-3. **Phase 3 — Effects chain**: Built-in parametric EQ per sink; LV2 plugin loader.
-4. **Phase 4 — GTK4 app**: Visual stream router + EQ editor.
-5. **Phase 5 — Web server**: REST API + WebSocket, browser-based UI (optional).
+### EngineCmd (sent via `pw::channel::channel` into the PW thread)
 
-## System Requirements
+```
+Shutdown
+ActivatePreset(Preset)               DeactivatePreset { preset_id }
+UpdatePresetBands { preset_id, bands }
+UpdatePresetOutputVolume { preset_id, output_idx, volume }
+RouteToPreset { stream_node_id, preset_id }
+UnrouteStream { stream_node_id }
+CreateVirtualMic(VirtualMic)         DestroyVirtualMic { mic_id }
+UpdateVirtualMicInputGain { mic_id, input_idx, gain }
+```
 
-- PipeWire ≥ 0.3.65
-- GTK 4.x + libadwaita (for GTK app)
-- LV2 development headers (optional, for plugin hosting)
-- Rust stable ≥ 1.75
+### PwEvent (broadcast to WebSocket subscribers)
 
-## Notes
+```
+NodeAdded(AudioNode)  NodeUpdated(AudioNode)  NodeRemoved { id }
+LinkAdded(AudioLink)  LinkRemoved { id }
+DefaultsChanged { sink_name, source_name }
+Snapshot { nodes, links, default_sink, default_source }
+PresetActivated { preset_id, node_id }   PresetDeactivated { preset_id }
+VirtualMicCreated { mic_id, node_id }    VirtualMicDestroyed { mic_id }
+```
 
-- The PipeWire main loop is **not** thread-safe; all PW operations must happen on the PW thread. Use `pipewire::channel::channel()` to send commands from other threads into the PW loop.
-- Virtual sinks are created as `pw_filter` nodes with the `PW_KEY_MEDIA_CLASS` set to `"Audio/Sink"`.
-- Stream routing is done by setting `node.target` link metadata on the PipeWire session manager (WirePlumber).
+### PipeWire node naming convention
+
+- Preset virtual sinks: `pw-ctrl.preset.{id}` (`media.class = Audio/Sink`)
+- Virtual mic sources: `pw-ctrl.vmic.{id}` (`media.class = Audio/Source`, `node.autoconnect = false`)
+- Preset input capture streams: `pw-ctrl.vmic-in.{idx}`
+
+Frontend detects active state by scanning `nodes` map for matching `node_name` — do NOT rely on event timing.
+
+### PipeWire thread rules
+
+- The PW main loop is **not** thread-safe. All PW object creation/destruction must happen inside cmd_rx callbacks or registry listeners on the PW thread.
+- Use `pw::channel::channel()` to send `EngineCmd` from Tokio/web threads into the PW thread.
+- `Rc<RefCell<T>>` is used freely inside the PW thread; `Arc<RwLock<T>>` for the shared nodes/links maps visible to the web server.
+
+## Preset System (LV2 chain)
+
+**Data model:**
+```rust
+struct Preset {
+    id: String, name: String,
+    chain: Vec<ChainNode>,
+    outputs: Vec<OutputAssignment>,
+    channels: ChannelLayout,
+    source_inputs: Vec<String>,
+}
+struct ChainNode { id: String, label: Option<String>, bypass: bool, kind: ChainNodeKind }
+enum ChainNodeKind {
+    Lv2     { plugin_uri: String, controls: BTreeMap<String, f32> },
+    Builtin { label: String,      controls: BTreeMap<String, f32> },
+}
+struct OutputAssignment { node_name: String, volume: f32 }
+```
+
+**Audio flow:** App streams → `pw-ctrl.preset.{id}` (filter-chain capture, Audio/Sink)
+→ ordered LV2 plugin chain → playback stream into `eq-mix` → loopback exposes
+`eq-src` (Audio/Source) → N output loopbacks → real sinks/vmic mixers.
+
+**Generated graph:** `conf_gen::write_chain_graph` emits one
+`{ type = lv2 plugin = "URI" control = { ... } }` (or `{ type = builtin ... }`)
+node per `ChainNode`. The audio in/out symbols come from the LV2 catalog via
+`lv2::primary_audio_port` (preference: `port-groups#center` → `#left` → first
+non-sidechain audio port). `bypass = true` is rendered as `builtin copy` to
+preserve graph topology.
+
+**Updating controls:** `PUT /presets/{id}/chain/{idx}/control { symbol, value }`
+mutates the in-memory model and persists `state.toml`. Changes only take effect
+in the running PipeWire after `/config/apply` (regenerates conf + restarts
+pipewire/wireplumber). Live `pw-cli set-param Props` updates are not wired.
+
+**Add/remove plugin:** add fetches the plugin's port defaults from the catalog
+and seeds `controls`. Remove/move/bypass mutate the chain in place.
+
+## Virtual Mic System
+
+**Data model:**
+```rust
+struct VirtualMic { id: String, name: String, inputs: Vec<MicInput> }
+struct MicInput { node_name: String, gain: f32 }
+```
+
+**Audio flow:** N input StreamRc (Direction::Input, each targeting an Audio/Source or `.monitor`) → ring buffers with per-input gain → output StreamRc (Direction::Output, media.class=Audio/Source) → capture apps (Discord, OBS, etc.).
+
+**Output stream always fills the full quantum** (max_frames) to prevent underruns in capture apps. Rings zero-fill when empty.
+
+**Gain update:** `UpdateVirtualMicInputGain` updates the `Rc<RefCell<f32>>` live. Add/remove inputs requires Destroy + Create.
+
+**Monitor loopback:** target `node_name` ending in `.monitor` (e.g. `alsa_output.xxx.monitor`) to capture what's playing on a sink.
+
+## Web Server (`crates/web-server/src/main.rs`)
+
+**Framework:** axum 0.8 — route params use `{param}` syntax (NOT `:param`).
+
+**REST API:**
+
+| Method | Path | Action |
+|---|---|---|
+| GET/POST | `/presets` | list / create |
+| GET/PUT/DELETE | `/presets/{id}` | get / update name+bands / delete |
+| POST | `/presets/{id}/activate` | spin up PW filter |
+| POST | `/presets/{id}/deactivate` | tear down |
+| POST | `/presets/{id}/outputs` | add output `{node_name, volume}` |
+| DELETE/PUT | `/presets/{id}/outputs/{idx}` | remove / update volume `{volume}` |
+| POST | `/presets/{id}/route/{node_id}` | route stream to preset |
+| POST | `/presets/{id}/unroute/{node_id}` | remove routing override |
+| GET/POST | `/virtual-mics` | list / create `{name}` |
+| GET/PUT/DELETE | `/virtual-mics/{id}` | get / update `{name?}` / delete |
+| POST | `/virtual-mics/{id}/activate` | spin up PW filter |
+| POST | `/virtual-mics/{id}/deactivate` | tear down |
+| POST | `/virtual-mics/{id}/inputs` | add input `{node_name, gain}` |
+| DELETE/PUT | `/virtual-mics/{id}/inputs/{idx}` | remove / update gain `{gain}` |
+| GET | `/ws` | WebSocket upgrade |
+| GET | `/nodes` | snapshot of all audio nodes |
+| GET | `/health` | `"ok"` |
+| GET | `/lv2/plugins` | catalog summary (uri, name, class, has_native_ui) |
+| GET | `/lv2/plugins/{uri}` | full plugin (all ports, scale points, flags) — uri url-encoded |
+| POST | `/lv2/rescan` | runs `lv2ls` + `lv2info` again, rewrites cache |
+| GET | `/lv2/ui/{uri}` | `{exists, path}` for `static/lv2-ui/<sanitized>/index.js` override |
+| POST | `/presets/{id}/chain` | add LV2 node `{plugin_uri, position?, label?}` |
+| DELETE | `/presets/{id}/chain/{idx}` | remove node |
+| PUT | `/presets/{id}/chain/{idx}/move` | reorder `{to: idx}` |
+| PUT | `/presets/{id}/chain/{idx}/control` | set `{symbol, value}` |
+| PUT | `/presets/{id}/chain/{idx}/bypass` | `{bypass: bool}` |
+| PUT | `/presets/{id}/chain/{idx}/label` | `{label?}` |
+
+**Static files:** served from `crates/web-server/static/` via `ServeDir`. Falls back to `index.html`.
+
+**Startup:** restores all persisted presets and virtual mics by re-sending their activate commands to the engine.
+
+## Web UI (`crates/web-server/static/index.html`)
+
+**Single-file vanilla JS, no frameworks, no build step.**
+
+**Four-tab layout:**
+- **Monitor** (`#view-monitor`): 2-column grid, 4 sections (Sinks, Sources, Playback Streams, Capture Streams). Cards live-update via WebSocket.
+- **Graph** (`#view-graph`): SVG canvas, draggable nodes, bezier links. Positions persisted to `localStorage` key `pw-graph-positions`.
+- **Presets** (`#view-presets`): sidebar list + detail panel (EQ bands editor, output assignments, stream routing).
+- **Virtual Mics** (`#view-mics`): sidebar list + detail panel (input sources with gain sliders).
+
+**All URLs are relative** — no hardcoded `localhost`. WebSocket uses `wss://` when page is loaded over HTTPS (Cloudflare tunnel compatible).
+
+**WebSocket `handleMsg` dispatch:**
+
+```
+Snapshot          → nodes.clear(), links.clear(), renderAll(), renderGraph()
+NodeAdded/Updated → upsertCard(), updateCounts(), scheduleGraphRender()
+                    if node_name starts with pw-ctrl.preset./* or pw-ctrl.vmic./*
+                    → refreshes Presets/Mics tab if active
+NodeRemoved       → removeCard(), scheduleGraphRender()
+LinkAdded/Removed → upsertCard(sink), scheduleGraphRender(), renderPresetDetail/MicDetail
+DefaultsChanged   → re-renders sinks+sources cards (badge-default)
+PresetActivated/Deactivated   → renderPresetList() + renderPresetDetail()
+VirtualMicCreated/Destroyed   → renderMicList() + renderMicDetail()
+```
+
+**Active detection in frontend:**
+Both presets and virtual mics check activity by scanning `nodes` Map for a node whose `node_name` matches the expected PW name — no separate active flag needed.
+
+**Stereo link deduplication:**
+PipeWire emits 2 `AudioLink` objects per stereo connection. Deduplicate with `Set` keyed by `"${output_node}-${input_node}"` in `playingHTML()`, `buildPairMap()`, and `renderGraph()`.
+
+**Preset output picker:** `<select>` with `<optgroup label="Physical Sinks">` — excludes nodes already in `preset.outputs` and all `pw-ctrl.*` nodes. Only real `Audio/Sink` nodes.
+
+**Virtual mic input picker:** `<optgroup label="Microphones">` (Audio/Source, no `.monitor`, no `pw-ctrl.`) + `<optgroup label="Monitors (Loopback)">` (Audio/Source ending in `.monitor`). Excludes already-added inputs.
+
+**EQ bands:** 8 bands, debounced PUT at 600ms. `gain_db` input is disabled for LowPass/HighPass types.
+
+**Volume/gain sliders:** debounced PUT at 400ms. Preset output volume: 0–1.0. Virtual mic gain: 0–2.0 (allows boost up to 200%).
+
+**Theme:**
+- Dark: `:root` CSS variables, `--font-ui: Oxanium`, `--font-mono: IBM Plex Mono`
+- OLED: `html.oled` class, `--bg: #000000`, persisted to `localStorage` key `pw-oled`
+
+**Graph columns:**
+```
+Stream/Output/Audio  x=30   #8830e0
+Audio/Sink           x=280  #2070d8
+Audio/Source         x=530  #10a858
+Stream/Input/Audio   x=780  #d85010
+NODE_W=160, NODE_H=68, NODE_GAP=10
+```
+
+## Key Invariants
+
+- Never put PipeWire or DSP logic in frontends — always in `crates/core`.
+- Axum 0.8 route params: `{id}`, not `:id`.
+- `routing::put` is NOT imported in main.rs — `.put()` is called as a `MethodRouter` method, not the standalone function.
+- `node.autoconnect = false` on virtual mic output prevents WirePlumber from auto-routing random apps to it.
+- Ring buffer capacity: 8192 samples (power-of-2). Both `preset_filter` and `virtual_mic_filter` use identical `RingBuf` implementations (currently duplicated — can be extracted to a shared module later).
